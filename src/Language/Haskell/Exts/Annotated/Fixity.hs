@@ -43,8 +43,46 @@ import Language.Haskell.Exts.Annotated.Simplify ( sQOp, sOp, sAssoc, sQName, sMo
 
 import Data.Char (isUpper)
 import Control.Monad (when, (<=<), liftM, liftM2, liftM3, liftM4)
-import Data.Traversable (mapM)
+-- import Data.Traversable (mapM)
+import qualified Data.Traversable as T
 import Prelude hiding (mapM)
+
+import Debug.Trace
+
+import Control.Monad.Cont (runContT)
+
+-- mapM :: Monad m => (a -> m b) -> [a] -> m [b]
+-- mapM f xs = runContT (mapM (lift . f) xs) return
+
+
+sequence' :: Monad m => [m a] -> m [a]
+sequence' l = go l id
+  where
+    go []     dlist = return $ dlist []
+    go (m:ms) dlist = do x <- m
+                         go ms (dlist . (x:))
+
+mapM :: Monad m => (a -> m b) -> [a] -> m [b]
+mapM f l = sequence' (map f l)
+
+
+mmapM :: (Monad m, T.Traversable t) => (a -> m b) -> t a -> m (t b)
+mmapM = T.mapM
+
+
+-- liftM2'  :: (Monad m) => (a1 -> a2 -> r) -> m a1 -> m a2 -> m r
+-- -- liftM2 f m1 m2 = do
+-- --   x1 <- m1
+-- --   x2 <- m2
+-- --   return (f x1 x2)
+-- liftM2 f m1 m2 = do
+--   x1 <- m1
+--   x2 <- m2
+--   return (f x1 x2)
+
+
+-- mapM :: Monad m => (a -> m b) -> t a -> m (t b)
+-- mapM f ta = foldM f [] 
 
 -- | All AST elements that may include expressions which in turn may
 --   need fixity tweaking will be instances of this class.
@@ -53,6 +91,11 @@ class AppFixity ast where
   --   fixities given. Assumes that all operator expressions are
   --   fully left associative chains to begin with.
   applyFixities :: Monad m => [Fixity]      -- ^ The fixities to account for.
+                    -> ast SrcSpanInfo      -- ^ The element to tweak.
+                    -> m (ast SrcSpanInfo)  -- ^ The same element, but with operator expressions updated, or a failure.
+  -- applyFixities fs ast = runContT ()
+
+  applyFixitieX :: Monad m => [Fixity]      -- ^ The fixities to account for.
                     -> ast SrcSpanInfo      -- ^ The element to tweak.
                     -> m (ast SrcSpanInfo)  -- ^ The same element, but with operator expressions updated, or a failure.
 
@@ -131,21 +174,21 @@ instance AppFixity Module where
       where (mn, _, _) = sModuleHead mmh
     applyFixities fixs (XmlPage l mn os xn xas mexp cs) =
         liftM3 (XmlPage l mn os xn) (fix xas) (fix mexp) (fix cs)
-      where fix xs = mapM (applyFixities fixs) xs
+      where fix xs = mmapM (applyFixities fixs) xs
     applyFixities fixs (XmlHybrid l mmh prs imp decls xn xas mexp cs) =
         liftM4 (flip (XmlHybrid l mmh prs imp) xn) (appFixDecls (Just mn) fixs decls)
                 (fixe xas) (fixe mexp) (fixe cs)
       where fixe xs = let extraFixs = getFixities (Just mn) decls
-                       in mapM (applyFixities (fixs++extraFixs)) xs
+                       in mmapM (applyFixities (fixs++extraFixs)) xs
             (mn, _, _) = sModuleHead mmh
 
 instance AppFixity Decl where
     applyFixities fixs decl = case decl of
-        ClassDecl l ctxt dh deps cdecls   -> liftM (ClassDecl l ctxt dh deps) $ mapM (mapM fix) cdecls
-        InstDecl  l ctxt ih idecls        -> liftM (InstDecl  l ctxt ih)      $ mapM (mapM fix) idecls
+        ClassDecl l ctxt dh deps cdecls   -> liftM (ClassDecl l ctxt dh deps) $ mmapM (mapM fix) cdecls
+        InstDecl  l ctxt ih idecls        -> liftM (InstDecl  l ctxt ih)      $ mmapM (mapM fix) idecls
         SpliceDecl l spl        -> liftM (SpliceDecl l) $ fix spl
         FunBind l matches       -> liftM (FunBind l) $ mapM fix matches
-        PatBind l p mt rhs bs   -> liftM3 (flip (PatBind l) mt) (fix p) (fix rhs) (mapM fix bs)
+        PatBind l p mt rhs bs   -> liftM3 (flip (PatBind l) mt) (fix p) (fix rhs) (mmapM fix bs)
         AnnPragma l ann         -> liftM (AnnPragma l) $ fix ann
         _                       -> return decl
       where fix x = applyFixities fixs x
@@ -181,8 +224,8 @@ instance AppFixity InstDecl where
 
 instance AppFixity Match where
     applyFixities fixs match = case match of
-        Match l n ps rhs bs -> liftM3 (Match l n) (mapM fix ps) (fix rhs) (mapM fix bs)
-        InfixMatch l a n ps rhs bs -> liftM4 (flip (InfixMatch l) n) (fix a) (mapM fix ps) (fix rhs) (mapM fix bs)
+        Match l n ps rhs bs -> liftM3 (Match l n) (mapM fix ps) (fix rhs) (mmapM fix bs)
+        InfixMatch l a n ps rhs bs -> liftM4 (flip (InfixMatch l) n) (fix a) (mapM fix ps) (fix rhs) (mmapM fix bs)
       where fix x = applyFixities fixs x
 
 instance AppFixity Rhs where
@@ -237,7 +280,7 @@ instance AppFixity FieldUpdate where
     applyFixities _ fup = return fup
 
 instance AppFixity Alt where
-    applyFixities fixs (Alt l p galts bs) = liftM3 (Alt l) (fix p) (fix galts) (mapM fix bs)
+    applyFixities fixs (Alt l p galts bs) = liftM3 (Alt l) (fix p) (fix galts) (mmapM fix bs)
       where fix x = applyFixities fixs x
 
 instance AppFixity GuardedAlts where
@@ -280,66 +323,70 @@ instance AppFixity XAttr where
 -- Recursively fixes the "leaves" of the infix chains,
 -- without yet touching the chain itself. We assume all chains are
 -- left-associate to begin with.
-leafFix fixs e = case e of
-    InfixApp l e1 op e2       -> liftM2 (flip (InfixApp l) op) (leafFix fixs e1) (fix e2)
-    App l e1 e2               -> liftM2 (App l) (fix e1) (fix e2)
-    NegApp l e                -> liftM (NegApp l) $ fix e
-    Lambda l pats e           -> liftM2 (Lambda l) (mapM fix pats) $ fix e
-    Let l bs e                -> liftM2 (Let l) (fix bs) $ fix e
-    If l e a b                -> liftM3 (If l) (fix e) (fix a) (fix b)
-    Case l e alts             -> liftM2 (Case l) (fix e) $ mapM fix alts
-    Do l stmts                -> liftM (Do l) $ mapM fix stmts
-    MDo l stmts               -> liftM (MDo l) $ mapM fix stmts
-    Tuple l bx exps           -> liftM (Tuple l bx) $ mapM fix exps
-    List l exps               -> liftM (List l) $ mapM fix  exps
-    Paren l e                 -> liftM (Paren l) $ fix e
-    LeftSection l e op        -> liftM (flip (LeftSection l) op) (fix e)
-    RightSection l op e       -> liftM (RightSection l op) $ fix e
-    RecConstr l n fups        -> liftM (RecConstr l n) $ mapM fix fups
-    RecUpdate l e fups        -> liftM2 (RecUpdate l) (fix e) $ mapM fix fups
-    EnumFrom l e              -> liftM (EnumFrom l) $ fix e
-    EnumFromTo l e1 e2        -> liftM2 (EnumFromTo l) (fix e1) (fix e2)
-    EnumFromThen l e1 e2      -> liftM2 (EnumFromThen l) (fix e1) (fix e2)
-    EnumFromThenTo l e1 e2 e3 -> liftM3 (EnumFromThenTo l) (fix e1) (fix e2) (fix e3)
-    ListComp l e quals        -> liftM2 (ListComp l) (fix e) $ mapM fix quals
-    ParComp  l e qualss       -> liftM2 (ParComp l) (fix e) $ mapM (mapM fix) qualss
-    ExpTypeSig l e t          -> liftM (flip (ExpTypeSig l) t) (fix e)
-    BracketExp l b            -> liftM (BracketExp l) $ fix b
-    SpliceExp l s             -> liftM (SpliceExp l) $ fix s
-    XTag l n ats mexp cs      -> liftM3 (XTag l n) (mapM fix ats) (mapM fix mexp) (mapM fix cs)
-    XETag l n ats mexp        -> liftM2 (XETag l n) (mapM fix ats) (mapM fix mexp)
-    XExpTag l e               -> liftM (XExpTag l) $ fix e
-    XChildTag l cs            -> liftM (XChildTag l) $ mapM fix cs
-    Proc l p e                -> liftM2 (Proc l) (fix p) (fix e)
-    LeftArrApp l e1 e2        -> liftM2 (LeftArrApp l) (fix e1) (fix e2)
-    RightArrApp l e1 e2       -> liftM2 (RightArrApp l) (fix e1) (fix e2)
-    LeftArrHighApp l e1 e2    -> liftM2 (LeftArrHighApp l) (fix e1) (fix e2)
-    RightArrHighApp l e1 e2   -> liftM2 (RightArrHighApp l) (fix e1) (fix e2)
-    CorePragma l s e          -> liftM (CorePragma l s) (fix e)
-    SCCPragma l s e           -> liftM (SCCPragma l s) (fix e)
-    GenPragma l s ab cd e     -> liftM (GenPragma l s ab cd) (fix e)
+-- leafFix :: Monad m => [Fixity] -> Exp SrcSpanInfo -> m (Exp SrcSpanInfo)
+leafFix fixs e = runContT (leafFixCont fixs e) return
+-- leafFix fixs e = leafFixCont fixs e
+
+leafFixCont fixs e = case e of
+    InfixApp l e1 op e2       -> trace "InfixApp"        $ liftM2 (flip (InfixApp l) op) (leafFixCont fixs e1) (fix e2)
+    App l e1 e2               -> trace "App"             $ liftM2 (App l) (fix e1) (fix e2)
+    NegApp l e                -> trace "NegApp"          $ liftM (NegApp l) $ fix e
+    Lambda l pats e           -> trace "Lambda"          $ liftM2 (Lambda l) (mapM fix pats) $ fix e
+    Let l bs e                -> trace "Let"             $ liftM2 (Let l) (fix bs) $ fix e
+    If l e a b                -> trace "If"              $ liftM3 (If l) (fix e) (fix a) (fix b)
+    Case l e alts             -> trace "Case"            $ liftM2 (Case l) (fix e) $ mapM fix alts
+    Do l stmts                -> trace "Do"              $ liftM (Do l) $ mapM fix stmts
+    MDo l stmts               -> trace "MDo"             $ liftM (MDo l) $ mapM fix stmts
+    Tuple l bx exps           -> trace "Tuple"           $ liftM (Tuple l bx) $ mapM fix exps
+    List l exps               -> trace "List"            $ liftM (List l) $ mapM fix  exps
+    Paren l e                 -> trace "Paren"           $ liftM (Paren l) $ fix e
+    LeftSection l e op        -> trace "LeftSection"     $ liftM (flip (LeftSection l) op) (fix e)
+    RightSection l op e       -> trace "RightSection"    $ liftM (RightSection l op) $ fix e
+    RecConstr l n fups        -> trace "RecConstr"       $ liftM (RecConstr l n) $ mapM fix fups
+    RecUpdate l e fups        -> trace "RecUpdate"       $ liftM2 (RecUpdate l) (fix e) $ mapM fix fups
+    EnumFrom l e              -> trace "EnumFrom"        $ liftM (EnumFrom l) $ fix e
+    EnumFromTo l e1 e2        -> trace "EnumFromTo"      $ liftM2 (EnumFromTo l) (fix e1) (fix e2)
+    EnumFromThen l e1 e2      -> trace "EnumFromThen"    $ liftM2 (EnumFromThen l) (fix e1) (fix e2)
+    EnumFromThenTo l e1 e2 e3 -> trace "EnumFromThenTo"  $ liftM3 (EnumFromThenTo l) (fix e1) (fix e2) (fix e3)
+    ListComp l e quals        -> trace "ListComp"        $ liftM2 (ListComp l) (fix e) $ mapM fix quals
+    ParComp  l e qualss       -> trace "ParComp"         $ liftM2 (ParComp l) (fix e) $ mapM (mapM fix) qualss
+    ExpTypeSig l e t          -> trace "ExpTypeSig"      $ liftM (flip (ExpTypeSig l) t) (fix e)
+    BracketExp l b            -> trace "BracketExp"      $ liftM (BracketExp l) $ fix b
+    SpliceExp l s             -> trace "SpliceExp"       $ liftM (SpliceExp l) $ fix s
+    XTag l n ats mexp cs      -> trace "XTag"            $ liftM3 (XTag l n) (mapM fix ats) (mmapM fix mexp) (mapM fix cs)
+    XETag l n ats mexp        -> trace "XETag"           $ liftM2 (XETag l n) (mapM fix ats) (mmapM fix mexp)
+    XExpTag l e               -> trace "XExpTag"         $ liftM (XExpTag l) $ fix e
+    XChildTag l cs            -> trace "XChildTag"       $ liftM (XChildTag l) $ mapM fix cs
+    Proc l p e                -> trace "Proc"            $ liftM2 (Proc l) (fix p) (fix e)
+    LeftArrApp l e1 e2        -> trace "LeftArrApp"      $ liftM2 (LeftArrApp l) (fix e1) (fix e2)
+    RightArrApp l e1 e2       -> trace "RightArrApp"     $ liftM2 (RightArrApp l) (fix e1) (fix e2)
+    LeftArrHighApp l e1 e2    -> trace "LeftArrHighApp"  $ liftM2 (LeftArrHighApp l) (fix e1) (fix e2)
+    RightArrHighApp l e1 e2   -> trace "RightArrHighApp" $ liftM2 (RightArrHighApp l) (fix e1) (fix e2)
+    CorePragma l s e          -> trace "CorePragma"      $ liftM (CorePragma l s) (fix e)
+    SCCPragma l s e           -> trace "SCCPragma"       $ liftM (SCCPragma l s) (fix e)
+    GenPragma l s ab cd e     -> trace "GenPragma"       $ liftM (GenPragma l s ab cd) (fix e)
 
     _                         -> return e
   where
     fix x = applyFixities fixs x
 
 leafFixP fixs p = case p of
-        PInfixApp l p1 op p2    -> liftM2 (flip (PInfixApp l) op) (leafFixP fixs p1) (fix p2)
-        PNeg l p                -> liftM (PNeg l) $ fix p
-        PApp l n ps             -> liftM (PApp l n) $ mapM fix ps
-        PTuple l bx ps          -> liftM (PTuple l bx) $ mapM fix ps
-        PList l ps              -> liftM (PList l) $ mapM fix ps
-        PParen l p              -> liftM (PParen l) $ fix p
-        PRec l n pfs            -> liftM (PRec l n) $ mapM fix pfs
-        PAsPat l n p            -> liftM (PAsPat l n) $ fix p
-        PIrrPat l p             -> liftM (PIrrPat l) $ fix p
-        PatTypeSig l p t        -> liftM (flip (PatTypeSig l) t) (fix p)
-        PViewPat l e p          -> liftM2 (PViewPat l) (fix e) (fix p)
-        PRPat l rps             -> liftM (PRPat l) $ mapM fix rps
-        PXTag l n ats mp ps     -> liftM3 (PXTag l n) (mapM fix ats) (mapM fix mp) (mapM fix ps)
-        PXETag l n ats mp       -> liftM2 (PXETag l n) (mapM fix ats) (mapM fix mp)
-        PXPatTag l p            -> liftM (PXPatTag l) $ fix p
-        PXRPats l rps           -> liftM (PXRPats l) $ mapM fix rps
-        PBangPat l p            -> liftM (PBangPat l) $ fix p
+        PInfixApp l p1 op p2    -> trace "PInfixApp"  $ liftM2 (flip (PInfixApp l) op) (leafFixP fixs p1) (fix p2)
+        PNeg l p                -> trace "PNeg"       $ liftM (PNeg l) $ fix p
+        PApp l n ps             -> trace "PApp"       $ liftM (PApp l n) $ mapM fix ps
+        PTuple l bx ps          -> trace "PTuple"     $ liftM (PTuple l bx) $ mapM fix ps
+        PList l ps              -> trace "PList"      $ liftM (PList l) $ mapM fix ps
+        PParen l p              -> trace "PParen"     $ liftM (PParen l) $ fix p
+        PRec l n pfs            -> trace "PRec"       $ liftM (PRec l n) $ mapM fix pfs
+        PAsPat l n p            -> trace "PAsPat"     $ liftM (PAsPat l n) $ fix p
+        PIrrPat l p             -> trace "PIrrPat"    $ liftM (PIrrPat l) $ fix p
+        PatTypeSig l p t        -> trace "PatTypeSig" $ liftM (flip (PatTypeSig l) t) (fix p)
+        PViewPat l e p          -> trace "PViewPat"   $ liftM2 (PViewPat l) (fix e) (fix p)
+        PRPat l rps             -> trace "PRPat"      $ liftM (PRPat l) $ mapM fix rps
+        PXTag l n ats mp ps     -> trace "PXTag"      $ liftM3 (PXTag l n) (mapM fix ats) (mmapM fix mp) (mapM fix ps)
+        PXETag l n ats mp       -> trace "PXETag"     $ liftM2 (PXETag l n) (mapM fix ats) (mmapM fix mp)
+        PXPatTag l p            -> trace "PXPatTag"   $ liftM (PXPatTag l) $ fix p
+        PXRPats l rps           -> trace "PXRPats"    $ liftM (PXRPats l) $ mapM fix rps
+        PBangPat l p            -> trace "PBangPat"   $ liftM (PBangPat l) $ fix p
         _                       -> return p
       where fix x = applyFixities fixs x

@@ -123,13 +123,8 @@ Flag base4
 Library
   Default-language:     Haskell98
   Build-Tools:          happy >= 1.17
-  Build-Depends:        array >= 0.1, pretty >= 1.0, cpphs >= 1.3
-  if flag(base4)
-    Build-depends:      base >= 4 && < 5
-    cpp-options:        -DBASE4
-  else
-    Build-depends:      base >= 3 && < 4
-
+  Build-Depends:        array >= 0.1, pretty >= 1.0, cpphs >= 1.3, syb, mtl, deepseq
+  Build-depends:      base >= 4 && < 5
 
   Exposed-modules:      Language.Haskell.Exts,
                         Language.Haskell.Exts.Lexer,
@@ -161,17 +156,3 @@ Library
 Source-Repository head
         Type:           git
         Location:       https://github.com/haskell-suite/haskell-src-exts.git
-
-Test-Suite test
-  type:                exitcode-stdio-1.0
-  main-is:             Test/Runner.hs
-  GHC-Options:         -threaded
-  Default-language:    Haskell2010
-  Build-depends:       base < 5,
-                       haskell-src-exts,
-                       smallcheck >= 1.0,
-                       tasty,
-                       tasty-smallcheck,
-                       tasty-hunit,
-                       filepath,
-                       directory

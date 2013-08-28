@@ -23,6 +23,8 @@ import Data.Generics (Data(..),Typeable(..))
 #endif
 #endif
 
+import Control.DeepSeq (($!!), deepseq)
+
 -- | A single position in the source.
 data SrcLoc = SrcLoc
     { srcFilename :: String
@@ -73,7 +75,8 @@ mergeSrcSpan :: SrcSpan -> SrcSpan -> SrcSpan
 mergeSrcSpan (SrcSpan fn sl1 sc1 el1 ec1) (SrcSpan _ sl2 sc2 el2 ec2) = 
     let (sl,sc) = min (sl1,sc1) (sl2,sc2)
         (el,ec) = max (el1,ec1) (el2,ec2)
-     in SrcSpan fn sl sc el ec
+     -- in (sl,sc,el,ec) `deepseq` SrcSpan fn sl sc el ec
+     in sl `seq` sc `seq` el `seq` ec `seq` SrcSpan fn sl sc el ec
 
 -- | Test if a given span starts and ends at the same location.
 isNullSpan :: SrcSpan -> Bool
