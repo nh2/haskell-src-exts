@@ -43,6 +43,7 @@ import Language.Haskell.Exts.Annotated.Simplify ( sQOp, sOp, sAssoc, sQName, sMo
 
 import Data.Char (isUpper)
 import Control.Monad (when, (<=<), liftM, liftM2, liftM3, liftM4)
+import Control.Monad.Cont (runContT)
 import Data.Traversable (mapM)
 import Prelude hiding (mapM)
 
@@ -280,8 +281,14 @@ instance AppFixity XAttr where
 -- Recursively fixes the "leaves" of the infix chains,
 -- without yet touching the chain itself. We assume all chains are
 -- left-associate to begin with.
-leafFix fixs e = case e of
-    InfixApp l e1 op e2       -> liftM2 (flip (InfixApp l) op) (leafFix fixs e1) (fix e2)
+
+-- Continuation monad to force all those liftMs into the heap.
+-- Without this, we would stack overflow (see #27 and GHC #8189).
+leafFix :: Monad m => [Fixity] -> Exp SrcSpanInfo -> m (Exp SrcSpanInfo)
+leafFix fixs e = runContT (leafFixCont fixs e) return
+
+leafFixCont fixs e = case e of
+    InfixApp l e1 op e2       -> liftM2 (flip (InfixApp l) op) (leafFixCont fixs e1) (fix e2)
     App l e1 e2               -> liftM2 (App l) (fix e1) (fix e2)
     NegApp l e                -> liftM (NegApp l) $ fix e
     Lambda l pats e           -> liftM2 (Lambda l) (mapM fix pats) $ fix e
